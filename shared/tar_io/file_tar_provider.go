@@ -1,8 +1,9 @@
 package tar_io
 
 import (
-	"fmt"
 	"os"
+	
+	"github.com/sirupsen/logrus"
 )
 
 type fileTarProvider struct {
@@ -10,28 +11,28 @@ type fileTarProvider struct {
 }
 
 func (f *fileTarProvider) Files() <-chan *TarFile {
-	filesChanRW := make(chan *TarFile)
+    filesChan := make(chan *TarFile)
 
-	var goRoutineErr error
-	go func() {
-		defer close(filesChanRW)
+    go func() {
+        defer close(filesChan)
 
-		tarFilePath := f.fullFilePath
-		fileInfo, err := os.Stat(f.fullFilePath)
-		if err != nil {
-			goRoutineErr = fmt.Errorf("Unable to get file info for '%s', error: %s", f.fullFilePath, err.Error())
-			return
-		}
+        // Get file info
+        info, err := os.Stat(f.fullFilePath)
+        if err != nil {
+            logrus.Errorf("unable to stat file %q: %v", f.fullFilePath, err)
+            return
+        }
 
-		contentReadCloser, err := os.OpenFile(f.fullFilePath, os.O_RDONLY, 0)
-		if err != nil {
-			goRoutineErr = fmt.Errorf("Unable to read file '%s', error: %s", f.fullFilePath, err.Error())
-			return
-		}
+        // Open file for reading
+        rc, err := os.Open(f.fullFilePath)
+        if err != nil {
+            logrus.Errorf("unable to open file %q: %v", f.fullFilePath, err)
+            return
+        }
 
-		isOnlyFile := true
-		filesChanRW <- NewTarFile(tarFilePath, contentReadCloser, isOnlyFile, fileInfo)
-	}()
+        // Send the single TarFile down the channel
+        filesChan <- NewTarFile(f.fullFilePath, rc, true, info)
+    }()
 
-	return filesChanRW
+    return filesChan
 }

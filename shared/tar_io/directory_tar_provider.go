@@ -5,6 +5,9 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
+	
+	"github.com/sirupsen/logrus"
 )
 
 type directoryTarProvider struct {
@@ -13,56 +16,57 @@ type directoryTarProvider struct {
 }
 
 func (d *directoryTarProvider) Files() <-chan *TarFile {
-	filesChanRW := make(chan *TarFile)
+    filesChan := make(chan *TarFile)
 
-	var goRoutineErr error
-	go func() {
-		defer close(filesChanRW)
+    go func() {
+        defer close(filesChan)
 
-		//TODO: This filepath.Walk can later be abstracted for different filesystems with `afero.Walk` from github.com/spf13/afero
-		walkErr := filepath.Walk(d.fullDirPath, func(path string, info os.FileInfo, errParam error) error {
-			if errParam != nil {
-				return errParam
-			}
+        // Walk the directory (could swap to afero.Walk later)
+        if err := filepath.Walk(d.fullDirPath, func(path string, info os.FileInfo, errParam error) error {
+            if errParam != nil {
+                return errParam
+            }
 
-			if d.filePattern != "" {
-				if match, matchErr := filepath.Match(d.filePattern, info.Name()); matchErr != nil {
-					return fmt.Errorf("File pattern match error. Pattern was '%s'. Error: %s", d.filePattern, matchErr.Error())
-				} else if !match {
-					return nil
-				}
-			}
+            // Filter by pattern if provided
+            if d.filePattern != "" {
+                match, matchErr := filepath.Match(d.filePattern, info.Name())
+                if matchErr != nil {
+                    return fmt.Errorf("file pattern match error for '%s': %w", d.filePattern, matchErr)
+                }
+                if !match {
+                    return nil
+                }
+            }
 
-			relPath := path[len(d.fullDirPath):]
-			if relPath == "" {
-				return nil
-			}
+            // Compute relative path
+            relPath := strings.TrimPrefix(path, d.fullDirPath)
+            if relPath == "" {
+                return nil
+            }
+            relPath = strings.TrimPrefix(relPath, string(os.PathSeparator))
 
-			relPath = relPath[1:]
+            // Open file if not a directory
+            var content io.ReadCloser
+            if !info.IsDir() {
+                f, openErr := os.Open(path)
+                if openErr != nil {
+                    return fmt.Errorf("unable to open file '%s': %w", path, openErr)
+                }
+                content = f
+            }
 
-			var contentReadCloser io.ReadCloser = nil
-			if !info.IsDir() {
-				tmpContentReadCloser, err := os.OpenFile(path, os.O_RDONLY, 0)
-				if err != nil {
-					return fmt.Errorf("Unable to read file '%s', error: %s", path, err.Error())
-				}
-				contentReadCloser = tmpContentReadCloser
-			}
+            // Send the TarFile down the channel
+            filesChan <- NewTarFile(relPath, content, false, info)
+            return nil
+        }); err != nil {
+            // Log the error; nothing left to do since channel is closing
+            logrus.Errorf("unable to walk dir %q: %v", d.fullDirPath, err)
+        }
+    }()
 
-			isOnlyFile := false
-			filesChanRW <- NewTarFile(relPath, contentReadCloser, isOnlyFile, info)
-
-			return nil
-		})
-
-		if walkErr != nil {
-			goRoutineErr = fmt.Errorf("Unable to walk dir '%s', error: %s", d.fullDirPath, walkErr.Error())
-			return
-		}
-	}()
-
-	return filesChanRW
+    return filesChan
 }
+
 
 type emptyReader struct{}
 
